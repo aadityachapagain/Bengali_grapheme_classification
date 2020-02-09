@@ -1,6 +1,9 @@
 """
 Mixup cutMix  implementation  with OHEM loss
 """
+import torch.nn.functional as F
+import numpy as np
+import torch
 
 def ohem_loss( rate, cls_pred, cls_target ):
     batch_size = cls_pred.size(0) 
@@ -77,18 +80,18 @@ def mixup_criterion(preds1,preds2,preds3, targets, rate=0.7):
 
 
 
-for i, (image_id, images, label1, label2, label3) in enumerate(data_loader_train):
-    images = images.to(device)
-    label1 = label1.to(device)
-    label2 = label2.to(device)
-    label3 = label3.to(device)
-    # print (image_id, label1, label2, label3)
+# for i, (image_id, images, label1, label2, label3) in enumerate(data_loader_train):
+#     images = images.to(device)
+#     label1 = label1.to(device)
+#     label2 = label2.to(device)
+#     label3 = label3.to(device)
+#     # print (image_id, label1, label2, label3)
 
-    if np.random.rand()<0.5:
-        images, targets = mixup(images, label1, label2, label3, 0.4)
-        output1, output2, output3 = model(images)
-        loss = mixup_criterion(output1,output2,output3, targets) 
-    else:
-        images, targets = cutmix(images, label1, label2, label3, 0.4)
-        output1, output2, output3 = model(images)
-        loss = cutmix_criterion(output1,output2,output3, targets) 
+#     if np.random.rand()<0.5:
+#         images, targets = mixup(images, label1, label2, label3, 0.4)
+#         output1, output2, output3 = model(images)
+#         loss = mixup_criterion(output1,output2,output3, targets) 
+#     else:
+#         images, targets = cutmix(images, label1, label2, label3, 0.4)
+#         output1, output2, output3 = model(images)
+#         loss = cutmix_criterion(output1,output2,output3, targets) 
