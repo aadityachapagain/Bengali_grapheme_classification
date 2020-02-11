@@ -414,15 +414,17 @@ class BengaliClassifier(nn.Module):
             'loss', 'loss_grapheme', 'loss_vowel', 'loss_consonant',
             'acc_grapheme', 'acc_vowel', 'acc_consonant']
 
-    def forward(self, x, y=None):
-        if np.random.rand()<0.4:
+    def forward(self, x, y=None, train = True):
+        if np.random.rand()<0.4 and train:
             x, targets = mixup(x, y[:, 0], y[:, 1], y[:, 2], 0.5)
             pred = self.predictor(x)
             loss_sig = 'mixup'
-        else:
+        elif train:
             x, targets = cutmix(x, y[:, 0], y[:, 1], y[:, 2], 0.9)
             pred = self.predictor(x)
             loss_sig = 'cutmix'
+        else:
+            pred = self.predictor(x)
             
         if isinstance(pred, tuple):
             assert len(pred) == 3
@@ -430,17 +432,18 @@ class BengaliClassifier(nn.Module):
         else:
             assert pred.shape[1] == self.n_total_class
             preds = torch.split(pred, [self.n_grapheme, self.n_vowel, self.n_consonant], dim=1)
-
-        if loss_sig == 'mixup':
-            loss = mixup_criterion(preds[0], preds[1], preds[2], targets)
+        if train:
+            if loss_sig == 'mixup':
+                loss = mixup_criterion(preds[0], preds[1], preds[2], targets)
+            else:
+                loss = cutmix_criterion(preds[0], preds[1], preds[2], targets)
+            ac_loss = loss[0] + loss[1] + loss[2]
         else:
-            loss = cutmix_criterion(preds[0], preds[1], preds[2], targets)
-        
-        ac_loss = loss[0] + loss[1] + loss[2]
-        # loss_grapheme = F.cross_entropy(preds[0], y[:, 0])
-        # loss_vowel = F.cross_entropy(preds[1], y[:, 1])
-        # loss_consonant = F.cross_entropy(preds[2], y[:, 2])
-        # loss = loss_grapheme + loss_vowel + loss_consonant
+            loss_grapheme = F.cross_entropy(preds[0], y[:, 0])
+            loss_vowel = F.cross_entropy(preds[1], y[:, 1])
+            loss_consonant = F.cross_entropy(preds[2], y[:, 2])
+            loss = [loss_grapheme, loss_vowel, loss_consonant]
+            ac_loss = loss_grapheme + loss_vowel + loss_consonant
         
         metrics = {
             'loss': sum(loss),
@@ -510,56 +513,59 @@ def train_model(model, dataloaders, optimizer, scheduler, num_epochs=25):
 
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
-          if phase == 'train':
-            model.train()  # Set model to training mode
-          else:
-            model.eval()   # Set model to evaluate mode
+            if phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
 
-          running_stats = {'loss_grapheme': 0,
-              'loss_vowel': 0,
-              'loss_consonant': 0,
-              'acc_grapheme': 0,
-              'acc_vowel': 0,
-              'acc_consonant': 0,
-          }
+            running_stats = {'loss_grapheme': 0,
+                'loss_vowel': 0,
+                'loss_consonant': 0,
+                'acc_grapheme': 0,
+                'acc_vowel': 0,
+                'acc_consonant': 0,
+            }
 
-          # Iterate over data.
-          for inputs, labels in dataloaders[phase]:
-              inputs = inputs.to(device)
-              labels = labels.to(device)
+            # Iterate over data.
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
 
-              # zero the parameter gradients
-              optimizer.zero_grad()
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-              # forward
-              # track history if only in train
-              with torch.set_grad_enabled(phase == 'train'):
-                  loss,metrics,preds = model(inputs, labels)
-                  # loss, _, preds = torch.max(outputs, 1)
+                # forward
+                # track history if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    phase_logit = phase == 'train'
+                    loss,metrics,preds = model(inputs, labels, train = phase_logit)
+                    # loss, _, preds = torch.max(outputs, 1)
 
-                  # backward + optimize only if in training phase
-                  if phase == 'train':
-                    loss.backward()
-                    optimizer.step()
+                    # backward + optimize only if in training phase
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-              # statistics
-              running_stats['loss_grapheme'] += metrics['loss_grapheme']
-              running_stats['loss_vowel'] += metrics['loss_vowel']
-              running_stats['loss_consonant'] += metrics['loss_consonant']
-              running_stats['acc_grapheme'] += metrics['acc_grapheme']
-              running_stats['acc_vowel'] += metrics['acc_vowel']
-              running_stats['acc_consonant'] += metrics['acc_consonant']
+                # statistics
+                running_stats['loss_grapheme'] += metrics['loss_grapheme']
+                running_stats['loss_vowel'] += metrics['loss_vowel']
+                running_stats['loss_consonant'] += metrics['loss_consonant']
+                running_stats['acc_grapheme'] += metrics['acc_grapheme']
+                running_stats['acc_vowel'] += metrics['acc_vowel']
+                running_stats['acc_consonant'] += metrics['acc_consonant']
 
-          print('-' * 10)
-          print(f'phase: {phase}')
-          print(f'total loss: {(running_stats["loss_grapheme"] + running_stats["loss_vowel"] + running_stats["loss_consonant"])/len(dataloaders[phase])}')
-          print(f'grapheme acc: {running_stats["acc_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc_consonant"]/len(dataloaders[phase])}')
-          epoch_acc = (running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) )/3
-          # deep copy the model
-          if phase == 'val' and  epoch_acc > best_acc:
-              best_acc = epoch_acc
-              best_model_wts = copy.deepcopy(model.state_dict())
-              torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_50_0.pt')
+            print('-' * 10)
+            print(f'phase: {phase}')
+            print(f'total loss: {(running_stats["loss_grapheme"] + running_stats["loss_vowel"] + running_stats["loss_consonant"])/len(dataloaders[phase])}')
+            print(f'grapheme acc: {running_stats["acc_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc_consonant"]/len(dataloaders[phase])}')
+            epoch_acc = (running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) )/3
+            # deep copy the model
+            if phase == 'val' and  epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+
+            if phase == 'val':
+                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_3.pt')
 
         print()
 
@@ -599,7 +605,7 @@ n_total = n_grapheme + n_vowel + n_consonant
 print('n_total', n_total)
 image_size = 128
 
-classifier = build_classifier(arch = 'pretrained',model_name='se_resnext50_32x4d', load_model_path= None, n_total = n_total, device = device)
+classifier = build_classifier(arch = 'pretrained', load_model_path= None, n_total = n_total, device = device)
 # classifier.load_state_dict(torch.load('../gdrive/My Drive/bengali_ghrapheme/predictor_0.pt'))
 
 # create labels
