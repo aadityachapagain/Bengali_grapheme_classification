@@ -415,14 +415,17 @@ class BengaliClassifier(nn.Module):
             'acc_grapheme', 'acc_vowel', 'acc_consonant']
 
     def forward(self, x, y=None, train = True):
-        if np.random.rand()<0.4 and train:
-            x, targets = mixup(x, y[:, 0], y[:, 1], y[:, 2], 0.5)
+        if np.random.rand()<0.3 and train:
+            x, targets = mixup(x, y[:, 0], y[:, 1], y[:, 2], 0.2)
             pred = self.predictor(x)
             loss_sig = 'mixup'
-        elif train:
-            x, targets = cutmix(x, y[:, 0], y[:, 1], y[:, 2], 0.9)
+        elif train and np.random.rand() < 0.9:
+            x, targets = cutmix(x, y[:, 0], y[:, 1], y[:, 2], 1.0)
             pred = self.predictor(x)
             loss_sig = 'cutmix'
+        elif train:
+            pred = self.predictor(x)
+            loss_sig = 'plain'
         else:
             pred = self.predictor(x)
             
@@ -435,8 +438,13 @@ class BengaliClassifier(nn.Module):
         if train:
             if loss_sig == 'mixup':
                 loss = mixup_criterion(preds[0], preds[1], preds[2], targets)
-            else:
+            elif loss_sig == 'cutmix':
                 loss = cutmix_criterion(preds[0], preds[1], preds[2], targets)
+            else:
+                loss_grapheme = F.cross_entropy(preds[0], y[:, 0])
+                loss_vowel = F.cross_entropy(preds[1], y[:, 1])
+                loss_consonant = F.cross_entropy(preds[2], y[:, 2])
+                loss = [loss_grapheme, loss_vowel, loss_consonant]
             ac_loss = loss[0] + loss[1] + loss[2]
         else:
             loss_grapheme = F.cross_entropy(preds[0], y[:, 0])
@@ -565,7 +573,7 @@ def train_model(model, dataloaders, optimizer, scheduler, num_epochs=25):
                 best_model_wts = copy.deepcopy(model.state_dict())
 
             if phase == 'val':
-                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_3.pt')
+                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_4.pt')
 
         print()
 
@@ -606,7 +614,7 @@ print('n_total', n_total)
 image_size = 128
 
 classifier = build_classifier(arch = 'pretrained', load_model_path= None, n_total = n_total, device = device)
-# classifier.load_state_dict(torch.load('../gdrive/My Drive/bengali_ghrapheme/predictor_0.pt'))
+classifier.load_state_dict(torch.load('../gdrive/My Drive/bengali_ghrapheme/predictor_4.pt'))
 
 # create labels
 labels = pd.read_csv('data/train.csv')
@@ -636,7 +644,7 @@ print('train_dataset', len(train_dataset))
 
 val_dataset = BengaliAIDataset(
     valid_image_split, val_labels,
-    transform=Transform(affine=True, crop=True, size=(image_size, image_size),
+    transform=Transform(affine=False, crop=True, size=(image_size, image_size),
                         threshold=20, train=True))
 print('val_dataset', len(train_dataset))
 
@@ -646,11 +654,11 @@ val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shu
 print('train iterations: {}, val iterations: {}'.format(len(train_loader), len(val_loader)))
 
 data_loaders = {'train':train_loader, 'val': val_loader}
-lr = 0.001
+lr = 0.004
 # Observe that all parameters are being optimized
 optimizer_ft = optim.SGD(classifier.parameters(), lr=lr, momentum=0.9)
 
 # Decay LR by a factor of 0.1 every 7 epochs
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=5, gamma=0.1)
+exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=9, gamma=0.1)
 
 trained_model = train_model(classifier, data_loaders, optimizer_ft, exp_lr_scheduler)
