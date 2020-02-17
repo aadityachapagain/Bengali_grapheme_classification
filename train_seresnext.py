@@ -611,7 +611,7 @@ n_vowel = 11
 n_consonant = 7
 n_total = n_grapheme + n_vowel + n_consonant
 print('n_total', n_total)
-image_size = 128
+image_size = 224
 
 classifier = build_classifier(arch = 'pretrained', load_model_path= None, n_total = n_total, device = device)
 classifier.load_state_dict(torch.load('../gdrive/My Drive/bengali_ghrapheme/predictor_4.pt'))
@@ -638,7 +638,7 @@ print('train images len: {}, val images len: {}'.format(len(train_labels), len(v
 # data loader
 train_dataset = BengaliAIDataset(
     train_image_split, train_labels,
-    transform=Transform(affine=True, crop=True, size=(image_size, image_size),
+    transform=Transform(affine=False, crop=True, size=(image_size, image_size),
                         threshold=20, train=True))
 print('train_dataset', len(train_dataset))
 
@@ -654,7 +654,7 @@ val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shu
 print('train iterations: {}, val iterations: {}'.format(len(train_loader), len(val_loader)))
 
 data_loaders = {'train':train_loader, 'val': val_loader}
-lr = 0.004
+lr = 0.0014
 # Observe that all parameters are being optimized
 optimizer_ft = optim.SGD(classifier.parameters(), lr=lr, momentum=0.9)
 
