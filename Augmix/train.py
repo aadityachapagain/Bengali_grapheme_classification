@@ -37,13 +37,7 @@ import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
 import cv2
 from skimage.transform import AffineTransform, warp
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-from IPython.core.display import display, HTML
-
-# import cumix and mixup augmentation
-from augmentation import cutmix, cutmix_criterion, mixup, mixup_criterion, ohem_loss
+from model import accuracy, build_classifier
 
 # --- plotly ---
 from plotly import tools, subplots
@@ -60,23 +54,7 @@ import lightgbm as lgb
 
 import pretrainedmodels
 
-
-model_names = sorted(name for name in models.__dict__
-                     if name.islower() and not name.startswith('__') and
-                     callable(models.__dict__[name]))
-
 parser = argparse.ArgumentParser(description='Trains an SeResnext-101 32dx8')
-parser.add_argument(
-    'clean_data', metavar='DIR', help='path to clean ImageNet dataset')
-parser.add_argument(
-    'corrupted_data', metavar='DIR_C', help='path to ImageNet-C dataset')
-parser.add_argument(
-    '--model',
-    '-m',
-    default='resnet50',
-    choices=model_names,
-    help='model architecture: ' + ' | '.join(model_names) +
-    ' (default: resnet50)')
 # Optimization options
 parser.add_argument(
     '--epochs', '-e', type=int, default=90, help='Number of epochs to train.')
@@ -84,11 +62,11 @@ parser.add_argument(
     '--learning-rate',
     '-lr',
     type=float,
-    default=0.02,
+    default=0.009,
     help='Initial learning rate.')
 parser.add_argument(
-    '--batch-size', '-b', type=int, default=256, help='Batch size.')
-parser.add_argument('--eval-batch-size', type=int, default=64)
+    '--batch-size', '-b', type=int, default=16, help='Batch size.')
+parser.add_argument('--eval-batch-size', type=int, default=32)
 parser.add_argument('--momentum', type=float, default=0.9, help='Momentum.')
 parser.add_argument(
     '--decay',
@@ -114,7 +92,7 @@ parser.add_argument(
     help='Severity of base augmentation operators')
 parser.add_argument(
     '--aug-prob-coeff',
-    default=1.,
+    default=.95,
     type=float,
     help='Probability distribution coefficients')
 parser.add_argument(
@@ -172,6 +150,12 @@ ALEXNET_ERR = [
     0.606500
 ]
 
+# Detect if we have a GPU available
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+datadir = Path('data')
+featherdir = Path('data')
+outdir = Path('.')
 
 def adjust_learning_rate(optimizer, epoch):
   """Sets the learning rate to the initial LR (linearly scaled to batch size) decayed by 10 every n / 3 epochs."""
@@ -277,7 +261,7 @@ class DatasetMixin(torch.utils.data.Dataset):
         if self.no_jsd:
           if self.transform:
             if self.train:
-              example = self.transform(example[0]), example[1]
+              example = self.transform(example[0]), example[1].astype(np.int64)
             else:
               example = self.transform(example)
         else:
@@ -286,7 +270,7 @@ class DatasetMixin(torch.utils.data.Dataset):
               examples = example[0]
               examples = tuple([self.transform(exm) for exm in examples])
               y = example[1]
-              example = tuple([examples, y])
+              example = tuple([examples, y.astype(np.int64)])
             else:
               example = tuple([self.transform(exm) for exm in example])
         return example
@@ -438,10 +422,7 @@ class Transform:
         self.sigma = sigma / 255.
 
     def __call__(self, example):
-        if self.train:
-            x, y = example
-        else:
-            x = example
+        x = example
         # --- Augmentation ---
         if self.affine:
             x = affine_image(x)
@@ -458,221 +439,176 @@ class Transform:
         if x.ndim == 2:
             x = x[None, :, :]
         x = x.astype(np.float32)
-        if self.train:
-            y = y.astype(np.int64)
-            return x, y
-        else:
-            return x
 
-def train(net, train_loader, optimizer):
-  """Train for one epoch."""
-  net.train()
-  data_ema = 0.
-  batch_ema = 0.
-  loss_ema = 0.
-  acc1_ema = 0.
-  acc5_ema = 0.
+        return x
 
-  end = time.time()
-  for i, (images, targets) in enumerate(train_loader):
-    # Compute data loading time
-    data_time = time.time() - end
-    optimizer.zero_grad()
-
-    if args.no_jsd:
-      images = images.cuda()
-      targets = targets.cuda()
-      logits = net(images)
-      loss = F.cross_entropy(logits, targets)
-      acc1, acc5 = accuracy(logits, targets, topk=(1, 5))
+def prepare_image(datadir, featherdir, data_type='train',
+                  submission=False, indices=[0, 1, 2, 3]):
+    assert data_type in ['train', 'test']
+    if submission:
+        image_df_list = [pd.read_parquet(datadir / f'{data_type}_image_data_{i}.parquet')
+                         for i in indices]
     else:
-      images_all = torch.cat(images, 0).cuda()
-      targets = targets.cuda()
-      logits_all = net(images_all)
-      logits_clean, logits_aug1, logits_aug2 = torch.split(
-          logits_all, images[0].size(0))
+        image_df_list = [pd.read_feather(featherdir / f'{data_type}_image_data_{i}.feather')
+                         for i in indices]
 
-      # Cross-entropy is only computed on clean images
-      loss = F.cross_entropy(logits_clean, targets)
+    print('image_df_list', len(image_df_list))
+    HEIGHT = 137
+    WIDTH = 236
+    images = [df.iloc[:, 1:].values.reshape(-1, HEIGHT, WIDTH) for df in image_df_list]
+    del image_df_list
+    gc.collect()
+    images = np.concatenate(images, axis=0)
+    return images
 
-      p_clean, p_aug1, p_aug2 = F.softmax(
-          logits_clean, dim=1), F.softmax(
-              logits_aug1, dim=1), F.softmax(
-                  logits_aug2, dim=1)
+def train_model(model, dataloaders, optimizer, scheduler, num_epochs=17):
+    since = time.time()
 
-      # Clamp mixture distribution to avoid exploding KL divergence
-      p_mixture = torch.clamp((p_clean + p_aug1 + p_aug2) / 3., 1e-7, 1).log()
-      loss += 12 * (F.kl_div(p_mixture, p_clean, reduction='batchmean') +
-                    F.kl_div(p_mixture, p_aug1, reduction='batchmean') +
-                    F.kl_div(p_mixture, p_aug2, reduction='batchmean')) / 3.
-      acc1, acc5 = accuracy(logits_clean, targets, topk=(1, 5))  # pylint: disable=unbalanced-tuple-unpacking
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = 0.0
 
-    loss.backward()
-    optimizer.step()
+    for epoch in range(num_epochs):
+        print('Epoch {}/{}'.format(epoch + 1, num_epochs))
+        print('-' * 10)
 
-    # Compute batch computation time and update moving averages.
-    batch_time = time.time() - end
-    end = time.time()
+        # Each epoch has a training and validation phase
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
 
-    data_ema = data_ema * 0.1 + float(data_time) * 0.9
-    batch_ema = batch_ema * 0.1 + float(batch_time) * 0.9
-    loss_ema = loss_ema * 0.1 + float(loss) * 0.9
-    acc1_ema = acc1_ema * 0.1 + float(acc1) * 0.9
-    acc5_ema = acc5_ema * 0.1 + float(acc5) * 0.9
+            running_stats = {
+            'loss': 0,
+            'loss_grapheme': 0,
+            'loss_vowel': 0,
+            'loss_consonant': 0,
+            'acc1_grapheme': 0, 'acc5_grapheme': 0,
+            'acc1_vowel': 0, 'acc5_vowel':0,
+            'acc1_consonant': 0, 'acc5_consonant':0
+        }
 
-    if i % args.print_freq == 0:
-      print(
-          'Batch {}/{}: Data Time {:.3f} | Batch Time {:.3f} | Train Loss {:.3f} | Train Acc1 '
-          '{:.3f} | Train Acc5 {:.3f}'.format(i, len(train_loader), data_ema,
-                                              batch_ema, loss_ema, acc1_ema,
-                                              acc5_ema))
+            # Iterate over data.
+            for inputs, labels in dataloaders[phase]:
+                if phase == 'train':
+                  pass
+                else:
+                  inputs = inputs.to(device)
+              
+                labels = labels.to(device)
 
-  return loss_ema, acc1_ema, batch_ema
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
+                # forward
+                # track history if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    phase_logit = phase == 'train'
+                    loss,metrics = model(inputs, labels, no_jsd = not phase_logit)
+                    # loss, _, preds = torch.max(outputs, 1)
 
-def test(net, test_loader):
-  """Evaluate network on given dataset."""
-  net.eval()
-  total_loss = 0.
-  total_correct = 0
-  with torch.no_grad():
-    for images, targets in test_loader:
-      images, targets = images.cuda(), targets.cuda()
-      logits = net(images)
-      loss = F.cross_entropy(logits, targets)
-      pred = logits.data.max(1)[1]
-      total_loss += float(loss.data)
-      total_correct += pred.eq(targets.data).sum().item()
+                    # backward + optimize only if in training phase
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-  return total_loss / len(test_loader.dataset), total_correct / len(
-      test_loader.dataset)
+                # statistics
+                running_stats['loss_grapheme'] += metrics['loss_grapheme']
+                running_stats['loss_vowel'] += metrics['loss_vowel']
+                running_stats['loss_consonant'] += metrics['loss_consonant']
+                
+                running_stats['acc1_grapheme'] += metrics['acc1_grapheme']
+                running_stats['acc1_vowel'] += metrics['acc1_vowel']
+                running_stats['acc1_consonant'] += metrics['acc1_consonant']
+                
+                running_stats['acc5_grapheme'] += metrics['acc5_grapheme']
+                running_stats['acc5_vowel'] += metrics['acc5_vowel']
+                running_stats['acc5_consonant'] += metrics['acc5_consonant']
 
+            print('-' * 10)
+            print(f'phase: {phase}')
+            print(f'total loss: {(running_stats["loss_grapheme"] + running_stats["loss_vowel"] + running_stats["loss_consonant"])/len(dataloaders[phase])}')
+            print(f'grapheme top-1 acc: {running_stats["acc1_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc1_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc1_consonant"]/len(dataloaders[phase])}')
+            print(f'grapheme top-k acc: {running_stats["acc5_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc5_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc5_consonant"]/len(dataloaders[phase])}')
 
-def test_c(net, test_transform):
-  """Evaluate network on given corrupted dataset."""
-  corruption_accs = {}
-  for c in CORRUPTIONS:
-    print(c)
-    for s in range(1, 6):
-      valdir = os.path.join(args.corrupted_data, c, str(s))
-      val_loader = torch.utils.data.DataLoader(
-          datasets.ImageFolder(valdir, test_transform),
-          batch_size=args.eval_batch_size,
-          shuffle=False,
-          num_workers=args.num_workers,
-          pin_memory=True)
+            epoch_acc = (running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) )/3
+            # deep copy the model
+            if phase == 'val' and  epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
 
-      loss, acc1 = test(net, val_loader)
-      if c in corruption_accs:
-        corruption_accs[c].append(acc1)
-      else:
-        corruption_accs[c] = [acc1]
+            if phase == 'val':
+                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_4.pt')
 
-      print('\ts={}: Test Loss {:.3f} | Test Acc1 {:.3f}'.format(
-          s, loss, 100. * acc1))
+        print()
 
-  return corruption_accs
+    time_elapsed = time.time() - since
+    print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    print('Best val Acc: {:4f}'.format(best_acc))
 
+    # load best model weights
+    model.load_state_dict(best_model_wts)
+    return model
 
-def main():
+# --- Model ---
+device = torch.device(device)
+n_grapheme = 168
+n_vowel = 11
+n_consonant = 7
+n_total = n_grapheme + n_vowel + n_consonant
+print('n_total', n_total)
 
+classifier = build_classifier(arch = 'pretrained', load_model_path= None, n_total = n_total, device = device)
+classifier.load_state_dict(torch.load('../gdrive/My Drive/bengali_ghrapheme/predictor_3.pt'))
 
-  if args.pretrained:
-    print("=> using pre-trained model '{}'".format(args.model))
-    net = models.__dict__[args.model](pretrained=True)
-  else:
-    print("=> creating model '{}'".format(args.model))
-    net = models.__dict__[args.model]()
+# create labels
+labels = pd.read_csv('data/train.csv')
+labels = labels[labels.columns[1:4]]
+labels = labels.values
 
-  optimizer = torch.optim.SGD(
-      net.parameters(),
-      args.learning_rate,
-      momentum=args.momentum,
-      weight_decay=args.decay)
+train_images_raw = prepare_image(datadir, datadir, 'train', submission = True)
 
-  # Distribute model across all visible GPUs
-  net = torch.nn.DataParallel(net).cuda()
-  cudnn.benchmark = True
+# Train test split
 
-  start_epoch = 0
+msk = np.random.rand(len(train_images_raw)) > 0.009
 
-  if args.resume:
-    if os.path.isfile(args.resume):
-      checkpoint = torch.load(args.resume)
-      start_epoch = checkpoint['epoch'] + 1
-      best_acc1 = checkpoint['best_acc1']
-      net.load_state_dict(checkpoint['state_dict'])
-      optimizer.load_state_dict(checkpoint['optimizer'])
-      print('Model restored from epoch:', start_epoch)
+train_image_split = train_images_raw[msk]
+train_labels = labels[msk]
 
-  if args.evaluate:
-    test_loss, test_acc1 = test(net, val_loader)
-    print('Clean\n\tTest Loss {:.3f} | Test Acc1 {:.3f}'.format(
-        test_loss, 100 * test_acc1))
+valid_image_split = train_images_raw[~msk]
+val_labels = labels[~msk]
+print('train images len: {}, val images len: {}'.format(len(train_image_split), len(valid_image_split)))
+print('train images len: {}, val images len: {}'.format(len(train_labels), len(val_labels)))
 
-    corruption_accs = test_c(net, test_transform)
-    for c in CORRUPTIONS:
-      print('\t'.join([c] + map(str, corruption_accs[c])))
+# data loader
 
-    print('mCE (normalized by AlexNet): ', compute_mce(corruption_accs))
-    return
+train_dataset = AugMixDataset(train_image_split)
 
-  if not os.path.exists(args.save):
-    os.makedirs(args.save)
-  if not os.path.isdir(args.save):
-    raise Exception('%s is not a dir' % args.save)
+train_dataset = BengaliAIDataset(
+    train_dataset, train_labels,
+    transform=Transform(affine=False, crop=True, size=(augmentations.IMAGE_SIZE, augmentations.IMAGE_SIZE),
+                        threshold=20, train=True))
+print('train_dataset', len(train_dataset))
 
-  log_path = os.path.join(args.save,
-                          'imagenet_{}_training_log.csv'.format(args.model))
-  with open(log_path, 'w') as f:
-    f.write(
-        'epoch,batch_time,train_loss,train_acc1(%),test_loss,test_acc1(%)\n')
+val_dataset = BengaliAIDataset(
+    valid_image_split, val_labels,
+    transform=Transform(affine=False, crop=True, size=(augmentations.IMAGE_SIZE, augmentations.IMAGE_SIZE),
+                        threshold=20, train=True))
+print('val_dataset', len(train_dataset))
 
-  best_acc1 = 0
-  print('Beginning training from epoch:', start_epoch + 1)
-  for epoch in range(start_epoch, args.epochs):
-    adjust_learning_rate(optimizer, epoch)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
-    train_loss_ema, train_acc1_ema, batch_ema = train(net, train_loader,
-                                                      optimizer)
-    test_loss, test_acc1 = test(net, val_loader)
+print('train iterations: {}, val iterations: {}'.format(len(train_loader), len(val_loader)))
 
-    is_best = test_acc1 > best_acc1
-    best_acc1 = max(test_acc1, best_acc1)
-    checkpoint = {
-        'epoch': epoch,
-        'model': args.model,
-        'state_dict': net.state_dict(),
-        'best_acc1': best_acc1,
-        'optimizer': optimizer.state_dict(),
-    }
+data_loaders = {'train':train_loader, 'val': val_loader}
+optimizer_ft = torch.optim.SGD(
+    classifier.parameters(),
+    args.learning_rate,
+    momentum=args.momentum,
+    weight_decay=args.decay)
 
-    save_path = os.path.join(args.save, 'checkpoint.pth.tar')
-    torch.save(checkpoint, save_path)
-    if is_best:
-      shutil.copyfile(save_path, os.path.join(args.save, 'model_best.pth.tar'))
-
-    with open(log_path, 'a') as f:
-      f.write('%03d,%0.3f,%0.6f,%0.2f,%0.5f,%0.2f\n' % (
-          (epoch + 1),
-          batch_ema,
-          train_loss_ema,
-          100. * train_acc1_ema,
-          test_loss,
-          100. * test_acc1,
-      ))
-
-    print(
-        'Epoch {:3d} | Train Loss {:.4f} | Test Loss {:.3f} | Test Acc1 '
-        '{:.2f}'
-        .format((epoch + 1), train_loss_ema, test_loss, 100. * test_acc1))
-
-    corruption_accs = test_c(net, test_transform)
-    for c in CORRUPTIONS:
-      print('\t'.join(map(str, [c] + corruption_accs[c])))
-
-    print('mCE (normalized by AlexNet):', compute_mce(corruption_accs))
-
-
-if __name__ == '__main__':
-  main()
+# Decay LR by a factor of 0.1 every 7 epochs
+exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=9, gamma=0.1)
+trained_model = train_model(classifier, data_loaders, optimizer_ft, exp_lr_scheduler)
+torch.save(trained_model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_3.pt')
