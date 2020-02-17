@@ -654,7 +654,7 @@ val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shu
 print('train iterations: {}, val iterations: {}'.format(len(train_loader), len(val_loader)))
 
 data_loaders = {'train':train_loader, 'val': val_loader}
-lr = 0.0014
+lr = 0.005
 # Observe that all parameters are being optimized
 optimizer_ft = optim.SGD(classifier.parameters(), lr=lr, momentum=0.9)
 
