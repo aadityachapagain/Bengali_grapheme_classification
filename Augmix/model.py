@@ -252,9 +252,9 @@ class BengaliClassifier(nn.Module):
             'loss_grapheme': loss_grapheme.item(),
             'loss_vowel': loss_vowel.item(),
             'loss_consonant': loss_consonant.item(),
-            'acc1_grapheme': acc1_grapheme, 'acc5_grapheme': acc5_grapheme,
-            'acc1_vowel': acc1_vowel, 'acc5_vowel':acc5_vowel,
-            'acc1_consonant': acc1_consonant, 'acc5_consonant':acc5_consonant
+            'acc1_grapheme': acc1_grapheme.item(), 'acc5_grapheme': acc5_grapheme.item(),
+            'acc1_vowel': acc1_vowel.item(), 'acc5_vowel':acc5_vowel.item(),
+            'acc1_consonant': acc1_consonant.item(), 'acc5_consonant':acc5_consonant.item()
         }
         return loss, metrics
 
