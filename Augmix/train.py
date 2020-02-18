@@ -62,7 +62,7 @@ parser.add_argument(
     '--learning-rate',
     '-lr',
     type=float,
-    default=0.009,
+    default=0.004,
     help='Initial learning rate.')
 parser.add_argument(
     '--batch-size', '-b', type=int, default=16, help='Batch size.')
@@ -531,7 +531,7 @@ def train_model(model, dataloaders, optimizer, scheduler, num_epochs=17):
             print(f'grapheme top-1 acc: {running_stats["acc1_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc1_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc1_consonant"]/len(dataloaders[phase])}')
             print(f'grapheme top-k acc: {running_stats["acc5_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc5_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc5_consonant"]/len(dataloaders[phase])}')
 
-            epoch_acc = (running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) )/3
+            epoch_acc = (running_stats['acc1_grapheme'] + running_stats['acc5_grapheme'])/2
             # deep copy the model
             if phase == 'val' and  epoch_acc > best_acc:
                 best_acc = epoch_acc
