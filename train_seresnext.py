@@ -566,7 +566,7 @@ def train_model(model, dataloaders, optimizer, scheduler, num_epochs=25):
             print(f'phase: {phase}')
             print(f'total loss: {(running_stats["loss_grapheme"] + running_stats["loss_vowel"] + running_stats["loss_consonant"])/len(dataloaders[phase])}')
             print(f'grapheme acc: {running_stats["acc_grapheme"]/len(dataloaders[phase])}, vowel acc: {running_stats["acc_vowel"]/len(dataloaders[phase])},consonent acc:{running_stats["acc_consonant"]/len(dataloaders[phase])}')
-            epoch_acc = (running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) + running_stats['acc_grapheme']/len(dataloaders[phase]) )/3
+            epoch_acc = running_stats['acc_grapheme']
             # deep copy the model
             if phase == 'val' and  epoch_acc > best_acc:
                 best_acc = epoch_acc
@@ -654,7 +654,7 @@ val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shu
 print('train iterations: {}, val iterations: {}'.format(len(train_loader), len(val_loader)))
 
 data_loaders = {'train':train_loader, 'val': val_loader}
-lr = 0.005
+lr = 0.004
 # Observe that all parameters are being optimized
 optimizer_ft = optim.SGD(classifier.parameters(), lr=lr, momentum=0.9)
 
