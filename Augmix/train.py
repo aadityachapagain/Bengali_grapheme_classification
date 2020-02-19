@@ -538,7 +538,7 @@ def train_model(model, dataloaders, optimizer, scheduler, num_epochs=17):
                 best_model_wts = copy.deepcopy(model.state_dict())
 
             if phase == 'val':
-                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_4.pt')
+                torch.save(model.state_dict(), f'../gdrive/My Drive/bengali_ghrapheme/predictor_3.pt')
 
         print()
 
