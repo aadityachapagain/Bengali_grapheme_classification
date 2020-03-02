@@ -62,7 +62,7 @@ parser.add_argument(
     '--learning-rate',
     '-lr',
     type=float,
-    default=0.004,
+    default=0.0013,
     help='Initial learning rate.')
 parser.add_argument(
     '--batch-size', '-b', type=int, default=16, help='Batch size.')
@@ -77,12 +77,12 @@ parser.add_argument(
 # AugMix options
 parser.add_argument(
     '--mixture-width',
-    default=3,
+    default=1,
     type=int,
     help='Number of augmentation chains to mix per augmented example')
 parser.add_argument(
     '--mixture-depth',
-    default=-1,
+    default=1,
     type=int,
     help='Depth of augmentation chains. -1 denotes stochastic depth in [1, 3]')
 parser.add_argument(
@@ -92,7 +92,7 @@ parser.add_argument(
     help='Severity of base augmentation operators')
 parser.add_argument(
     '--aug-prob-coeff',
-    default=.95,
+    default=1.0,
     type=float,
     help='Probability distribution coefficients')
 parser.add_argument(
